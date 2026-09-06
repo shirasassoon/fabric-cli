@@ -38,50 +38,263 @@ class TestAzureCliIdentityType:
         auth.set_access_mode("azure_cli")
         assert auth.get_identity_type() == "azure_cli"
 
+    @pytest.mark.parametrize(
+        "claims",
+        [
+            {},
+            {"tid": "tenant-A"},
+            {"oid": "principal-A"},
+        ],
+    )
+    def test_check_azure_cli_identity_missing_claims_failure(
+        self, claims, azure_cli_auth_fixture
+    ):
+        """Missing tenant or principal claims should fail authentication."""
+        auth = FabAuth()
+        auth._set_auth_properties(
+            {
+                con.IDENTITY_TYPE: "azure_cli",
+                con.FAB_TENANT_ID: "tenant-A",
+                con.FAB_PRINCIPAL_ID: "principal-A",
+            }
+        )
+
+        with pytest.raises(FabricCLIError) as exc_info:
+            auth._check_azure_cli_identity(claims)
+
+        assert ErrorMessages.Auth.azure_cli_identity_claims_missing() in str(
+            exc_info.value
+        )
+        assert exc_info.value.status_code == con.ERROR_AUTHENTICATION_FAILED
+        assert auth.get_identity_type() == "azure_cli"
+        assert auth.get_tenant_id() == "tenant-A"
+        assert auth._get_auth_property(con.FAB_PRINCIPAL_ID) == "principal-A"
+
+    def test_unchanged_identity_does_not_reset_state_success(
+        self, azure_cli_auth_fixture
+    ):
+        """A matching identity should not rewrite or clear authentication state."""
+        auth = FabAuth()
+        auth._set_auth_properties(
+            {
+                con.IDENTITY_TYPE: "azure_cli",
+                con.FAB_TENANT_ID: "tenant-A",
+                con.FAB_PRINCIPAL_ID: "principal-A",
+            }
+        )
+
+        with (
+            patch.object(auth, "_set_auth_properties") as mock_set_properties,
+            patch.object(auth, "logout") as mock_logout,
+            patch.object(fab_mem_store, "clear_caches") as mock_clear_caches,
+            patch.object(Context(), "reset_context") as mock_reset_context,
+        ):
+            auth._check_azure_cli_identity({"tid": "tenant-A", "oid": "principal-A"})
+
+        mock_set_properties.assert_not_called()
+        mock_logout.assert_not_called()
+        mock_clear_caches.assert_not_called()
+        mock_reset_context.assert_not_called()
+        assert auth.get_identity_type() == "azure_cli"
+        assert auth.get_tenant_id() == "tenant-A"
+        assert auth._get_auth_property(con.FAB_PRINCIPAL_ID) == "principal-A"
+
+    @pytest.mark.parametrize(
+        ("stored_properties", "expected_tenant", "expected_principal"),
+        [
+            (
+                {con.FAB_TENANT_ID: "tenant-A"},
+                "tenant-A",
+                "principal-A",
+            ),
+            (
+                {con.FAB_PRINCIPAL_ID: "principal-A"},
+                "tenant-A",
+                "principal-A",
+            ),
+        ],
+    )
+    def test_partial_identity_baseline_is_completed_success(
+        self,
+        stored_properties,
+        expected_tenant,
+        expected_principal,
+        azure_cli_auth_fixture,
+    ):
+        """A partial stored baseline should be completed from matching claims."""
+        auth = FabAuth()
+        auth._set_auth_properties(stored_properties)
+
+        auth._check_azure_cli_identity({"tid": "tenant-A", "oid": "principal-A"})
+
+        assert auth.get_tenant_id() == expected_tenant
+        assert auth._get_auth_property(con.FAB_PRINCIPAL_ID) == expected_principal
+
     @patch("fabric_cli.core.fab_auth.AzureCliCredential")
-    def test_first_token_acquisition_stores_tenant_success(
+    def test_first_token_acquisition_stores_identity_success(
         self, mock_credential_class, azure_cli_auth_fixture
     ):
-        """First token acquisition should discover and store tenant from JWT."""
+        """First token acquisition should store tenant and principal from JWT."""
         _mock_credential(mock_credential_class)
         auth = FabAuth()
         auth.set_access_mode("azure_cli")
         auth._azure_cli_credential = None
 
         assert auth.get_tenant_id() is None
-        with patch.object(
-            auth, "_decode_jwt_token", return_value={"tid": "discovered-tenant"}
+        with (
+            patch.object(
+                auth,
+                "_decode_jwt_token",
+                return_value={"tid": "discovered-tenant", "oid": "principal-A"},
+            ),
+            patch.object(auth, "logout", wraps=auth.logout) as mock_logout,
         ):
             auth._acquire_token_from_azure_cli(con.SCOPE_FABRIC_DEFAULT)
         assert auth.get_tenant_id() == "discovered-tenant"
+        assert auth._get_auth_property(con.FAB_PRINCIPAL_ID) == "principal-A"
+        mock_logout.assert_not_called()
 
     @patch("fabric_cli.core.fab_auth.AzureCliCredential")
     def test_tenant_updated_on_subsequent_calls_success(
         self, mock_credential_class, azure_cli_auth_fixture
     ):
-        """A changed Azure CLI tenant should reset context and cached resources."""
+        """A changed Azure CLI tenant should log out and reset cached state."""
         mock_credential, _ = _mock_credential(mock_credential_class)
         auth = FabAuth()
         auth.set_access_mode("azure_cli")
         auth._azure_cli_credential = None
-        with patch.object(
-            auth,
-            "_decode_jwt_token",
-            side_effect=[{"tid": "original-tenant"}, {"tid": "new-tenant"}],
+        context = Context()
+        with (
+            patch.object(
+                auth,
+                "_decode_jwt_token",
+                side_effect=[
+                    {"tid": "original-tenant", "oid": "principal-A"},
+                    {"tid": "new-tenant", "oid": "principal-A"},
+                ],
+            ),
+            patch.object(auth, "logout", wraps=auth.logout) as mock_logout,
+            patch.object(
+                fab_mem_store, "clear_caches", wraps=fab_mem_store.clear_caches
+            ) as mock_clear_caches,
+            patch.object(
+                context, "reset_context", wraps=context.reset_context
+            ) as mock_reset_context,
+            patch("fabric_cli.core.fab_auth.fab_logger.log_warning") as mock_warning,
         ):
             auth._acquire_token_from_azure_cli(con.SCOPE_FABRIC_DEFAULT)
             fab_mem_store._get_workspaces_from_cache.cache.update({"key": "value"})
             fab_mem_store._get_workspace_folders_from_cache.cache.update(
                 {"key": "value"}
             )
-            auth._acquire_token_from_azure_cli(con.SCOPE_FABRIC_DEFAULT)
-        assert auth.get_tenant_id() == "new-tenant"
-        assert auth.get_identity_type() == "azure_cli"
-        assert Context().get_tenant_id() == "new-tenant"
+            with pytest.raises(FabricCLIError) as exc_info:
+                auth._acquire_token_from_azure_cli(con.SCOPE_FABRIC_DEFAULT)
+        assert "Run `fab auth login --azure-cli`" in exc_info.value.message
+        assert auth.get_tenant_id() is None
+        assert auth.get_identity_type() is None
+        assert auth._azure_cli_credential is None
         assert fab_mem_store._get_workspaces_from_cache.cache.currsize == 0
         assert fab_mem_store._get_workspace_folders_from_cache.cache.currsize == 0
         mock_credential_class.assert_called_once()
         assert mock_credential.get_token.call_count == 2
+        mock_logout.assert_called_once_with()
+        mock_clear_caches.assert_called_once_with()
+        mock_reset_context.assert_called_once_with()
+        mock_warning.assert_called_once_with("Change detected in Azure CLI Tenant ID")
+
+    @patch("fabric_cli.core.fab_auth.AzureCliCredential")
+    def test_principal_updated_on_subsequent_calls_success(
+        self, mock_credential_class, azure_cli_auth_fixture
+    ):
+        """A changed Azure CLI principal should log out and reset cached state."""
+        mock_credential, _ = _mock_credential(mock_credential_class)
+        auth = FabAuth()
+        auth.set_access_mode("azure_cli")
+        auth._azure_cli_credential = None
+        context = Context()
+        with (
+            patch.object(
+                auth,
+                "_decode_jwt_token",
+                side_effect=[
+                    {"tid": "tenant-A", "oid": "principal-A"},
+                    {"tid": "tenant-A", "oid": "principal-B"},
+                ],
+            ),
+            patch.object(auth, "logout", wraps=auth.logout) as mock_logout,
+            patch.object(
+                fab_mem_store, "clear_caches", wraps=fab_mem_store.clear_caches
+            ) as mock_clear_caches,
+            patch.object(
+                context, "reset_context", wraps=context.reset_context
+            ) as mock_reset_context,
+            patch("fabric_cli.core.fab_auth.fab_logger.log_warning") as mock_warning,
+        ):
+            auth._acquire_token_from_azure_cli(con.SCOPE_FABRIC_DEFAULT)
+            fab_mem_store._get_workspaces_from_cache.cache.update({"key": "value"})
+            fab_mem_store._get_workspace_folders_from_cache.cache.update(
+                {"key": "value"}
+            )
+            with pytest.raises(FabricCLIError) as exc_info:
+                auth._acquire_token_from_azure_cli(con.SCOPE_FABRIC_DEFAULT)
+        assert "Run `fab auth login --azure-cli`" in exc_info.value.message
+        assert auth.get_tenant_id() is None
+        assert auth._get_auth_property(con.FAB_PRINCIPAL_ID) is None
+        assert auth.get_identity_type() is None
+        assert auth._azure_cli_credential is None
+        assert fab_mem_store._get_workspaces_from_cache.cache.currsize == 0
+        assert fab_mem_store._get_workspace_folders_from_cache.cache.currsize == 0
+        mock_credential_class.assert_called_once()
+        assert mock_credential.get_token.call_count == 2
+        mock_logout.assert_called_once_with()
+        mock_clear_caches.assert_called_once_with()
+        mock_reset_context.assert_called_once_with()
+        mock_warning.assert_called_once_with(
+            "Change detected in Azure CLI Principal ID"
+        )
+
+    @patch("fabric_cli.core.fab_auth.AzureCliCredential")
+    def test_tenant_and_principal_updated_on_subsequent_calls_success(
+        self, mock_credential_class, azure_cli_auth_fixture
+    ):
+        """Changed Azure CLI tenant and principal should report both changes."""
+        _mock_credential(mock_credential_class)
+        auth = FabAuth()
+        auth.set_access_mode("azure_cli")
+        auth._azure_cli_credential = None
+        context = Context()
+        with (
+            patch.object(
+                auth,
+                "_decode_jwt_token",
+                side_effect=[
+                    {"tid": "tenant-A", "oid": "principal-A"},
+                    {"tid": "tenant-B", "oid": "principal-B"},
+                ],
+            ),
+            patch.object(auth, "logout", wraps=auth.logout) as mock_logout,
+            patch.object(
+                fab_mem_store, "clear_caches", wraps=fab_mem_store.clear_caches
+            ) as mock_clear_caches,
+            patch.object(
+                context, "reset_context", wraps=context.reset_context
+            ) as mock_reset_context,
+            patch("fabric_cli.core.fab_auth.fab_logger.log_warning") as mock_warning,
+        ):
+            auth._acquire_token_from_azure_cli(con.SCOPE_FABRIC_DEFAULT)
+            with pytest.raises(FabricCLIError):
+                auth._acquire_token_from_azure_cli(con.SCOPE_FABRIC_DEFAULT)
+
+        assert auth.get_tenant_id() is None
+        assert auth._get_auth_property(con.FAB_PRINCIPAL_ID) is None
+        assert auth.get_identity_type() is None
+        assert auth._azure_cli_credential is None
+        mock_logout.assert_called_once_with()
+        mock_clear_caches.assert_called_once_with()
+        mock_reset_context.assert_called_once_with()
+        mock_warning.assert_called_once_with(
+            "Change detected in Azure CLI Tenant ID and Principal ID"
+        )
 
 
 class TestAzureCliTokenAcquisition:
@@ -302,21 +515,30 @@ class TestAzureCliLoginLogoutLifecycle:
     """Test login/logout lifecycle and credential management."""
 
     @patch("fabric_cli.core.fab_auth.AzureCliCredential")
-    def test_logout_clears_credential_success(
+    def test_logout_then_login_records_new_identity_success(
         self, mock_credential_class, azure_cli_auth_fixture
     ):
-        """logout() should clear the credential instance."""
+        """Explicit logout should allow a different identity to become the baseline."""
         _mock_credential(mock_credential_class)
-
         auth = FabAuth()
         auth.set_access_mode("azure_cli")
 
-        # Acquire token to set credential
-        auth._acquire_token_from_azure_cli(con.SCOPE_FABRIC_DEFAULT)
-        assert auth._azure_cli_credential is not None
+        with patch.object(
+            auth,
+            "_decode_jwt_token",
+            side_effect=[
+                {"tid": "tenant-A", "oid": "principal-A"},
+                {"tid": "tenant-B", "oid": "principal-B"},
+            ],
+        ):
+            auth._acquire_token_from_azure_cli(con.SCOPE_FABRIC_DEFAULT)
+            auth.logout()
+            auth.set_access_mode("azure_cli")
+            auth._acquire_token_from_azure_cli(con.SCOPE_FABRIC_DEFAULT)
 
-        auth.logout()
-        assert auth._azure_cli_credential is None
+        assert auth.get_identity_type() == "azure_cli"
+        assert auth.get_tenant_id() == "tenant-B"
+        assert auth._get_auth_property(con.FAB_PRINCIPAL_ID) == "principal-B"
 
     @patch("fabric_cli.core.fab_auth.AzureCliCredential")
     def test_first_acquisition_discovers_tenant_success(
@@ -329,7 +551,9 @@ class TestAzureCliLoginLogoutLifecycle:
         auth.set_access_mode("azure_cli")
         auth._azure_cli_credential = None
         with patch.object(
-            auth, "_decode_jwt_token", return_value={"tid": "discovered-tenant"}
+            auth,
+            "_decode_jwt_token",
+            return_value={"tid": "discovered-tenant", "oid": "principal-A"},
         ):
             auth._acquire_token_from_azure_cli(con.SCOPE_FABRIC_DEFAULT)
         assert auth.get_tenant_id() == "discovered-tenant"
@@ -342,7 +566,11 @@ class TestAzureCliLoginLogoutLifecycle:
         _mock_credential(mock_credential_class)
         auth = FabAuth()
         auth.set_access_mode("azure_cli")
-        with patch.object(auth, "_decode_jwt_token", return_value={"tid": "tenant-A"}):
+        with patch.object(
+            auth,
+            "_decode_jwt_token",
+            return_value={"tid": "tenant-A", "oid": "principal-A"},
+        ):
             auth._acquire_token_from_azure_cli(con.SCOPE_FABRIC_DEFAULT)
         assert auth.get_tenant_id() == "tenant-A"
 

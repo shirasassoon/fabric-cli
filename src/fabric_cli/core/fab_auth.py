@@ -421,10 +421,10 @@ class FabAuth:
         )
 
     def _acquire_token_from_azure_cli(self, scope: list[str]) -> dict:
-        """Acquire a token using the current Azure CLI authentication context.
+        """Acquire a token and validate its identity against the stored baseline.
 
-        Synchronizes Fabric CLI's tenant, resource caches, and command context
-        with the tenant claim in the acquired token.
+        Records the tenant and principal on first use. If either identity later
+        changes, logs out and clears cached Fabric CLI state.
         """
         from azure.core.exceptions import (
             ClientAuthenticationError,
@@ -440,11 +440,9 @@ class FabAuth:
             # AzureCliCredential.get_token expects scopes as positional args
             azure_token = self._azure_cli_credential.get_token(scope[0])
 
-            # Keep tenant-scoped context and caches aligned with Azure CLI
+            # Extract claims from the acquired token to determine the current Azure CLI identity
             claims = self._decode_jwt_token(azure_token.token)
-            tid = claims.get("tid")
-            if tid and tid != self.get_tenant_id():
-                self._synchronize_azure_cli_tenant(tid)
+            self._check_azure_cli_identity(claims)
 
             token_result = {
                 "access_token": azure_token.token,
@@ -478,14 +476,62 @@ class FabAuth:
                 status_code=con.ERROR_AUTHENTICATION_FAILED,
             )
 
-    def _synchronize_azure_cli_tenant(self, tenant_id: str) -> None:
-        """Synchronize state when the active Azure CLI tenant changes."""
+    def _check_azure_cli_identity(self, claims: dict) -> None:
+        """Records Azure CLI tenant and principal IDs and rejects identity drift."""
         from fabric_cli.core.fab_context import Context
         from fabric_cli.utils import fab_mem_store
 
-        self._set_auth_properties({con.FAB_TENANT_ID: tenant_id})
-        fab_mem_store.clear_caches()
-        Context().context = self.get_tenant()
+        # Get the tenant and principal IDs from the claims
+        tenant_id = claims.get("tid")
+        principal_id = claims.get("oid")
+
+        if tenant_id is None or principal_id is None:
+            raise FabricCLIError(
+                ErrorMessages.Auth.azure_cli_identity_claims_missing(),
+                status_code=con.ERROR_AUTHENTICATION_FAILED,
+            )
+
+        # Get the current tenant and principal IDs from the auth context
+        current_tenant_id = self.get_tenant_id()
+        current_principal_id = self._get_auth_property(con.FAB_PRINCIPAL_ID)
+
+        # Determine if there is a identity drift (tenant or principal)
+        tenant_drifted = (
+            current_tenant_id is not None and tenant_id != current_tenant_id
+        )
+        principal_drifted = (
+            current_principal_id is not None and principal_id != current_principal_id
+        )
+        # If any drift is detected, set the changed identity description
+        if tenant_drifted or principal_drifted:
+            if tenant_drifted and principal_drifted:
+                changed_identity = "Tenant ID and Principal ID"
+            elif tenant_drifted:
+                changed_identity = "Tenant ID"
+            else:
+                changed_identity = "Principal ID"
+            fab_logger.log_warning(f"Change detected in Azure CLI {changed_identity}")
+
+            # Logout, clear caches, and reset context before raising an error
+            self.logout()
+            fab_mem_store.clear_caches()
+            Context().reset_context()
+            raise FabricCLIError(
+                ErrorMessages.Auth.azure_cli_identity_changed(),
+                status_code=con.ERROR_AUTHENTICATION_FAILED,
+            )
+
+        # Record the initial Azure CLI identity as the baseline for future drift checks
+        auth_properties: dict[str, str] = {}
+
+        if current_tenant_id is None:
+            auth_properties[con.FAB_TENANT_ID] = tenant_id
+        if current_principal_id is None:
+            auth_properties[con.FAB_PRINCIPAL_ID] = principal_id
+        if auth_properties:
+            self._set_auth_properties(auth_properties)
+        if current_tenant_id is None:
+            Context().context = self.get_tenant()
 
     def print_auth_info(self):
         utils_ui.print_grey(json.dumps(self._get_auth_info(), indent=2))
