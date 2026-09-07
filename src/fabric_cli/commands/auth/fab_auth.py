@@ -220,6 +220,7 @@ def logout(args: Namespace) -> None:
 
 def status(args: Namespace) -> None:
     auth = FabAuth()
+    initial_identity_type = auth.get_identity_type()
 
     def __get_token_info(scope):
         try:
@@ -265,6 +266,10 @@ def status(args: Namespace) -> None:
     tenant_id = auth.get_tenant_id()
     if identity_type is None:
         token_info = {}
+        if initial_identity_type == "azure_cli":
+            fabric_secret = "N/A"
+            storage_secret = "N/A"
+            azure_secret = "N/A"
 
     upn = token_info.get("upn") or "N/A"
     oid = token_info.get("oid") or "N/A"

@@ -495,7 +495,7 @@ class FabAuth:
         current_tenant_id = self.get_tenant_id()
         current_principal_id = self._get_auth_property(con.FAB_PRINCIPAL_ID)
 
-        # Determine if there is a identity drift (tenant or principal)
+        # Determine if there is an identity drift (tenant or principal)
         tenant_drifted = (
             current_tenant_id is not None and tenant_id != current_tenant_id
         )

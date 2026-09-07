@@ -1016,7 +1016,7 @@ class TestAuth:
         )
 
         def get_access_token(*args, **kwargs):
-            if auth.get_access_token.call_count == 1:
+            if auth.get_access_token.call_count <= 2:
                 return "mocked_access_token"
             auth._auth_info = {}
             raise FabricCLIError(
@@ -1045,6 +1045,47 @@ class TestAuth:
         assert "Token Azure: N/A" in captured.out
         assert "Logged In: False" in captured.out
         assert "previous-tenant" not in captured.out
+
+    def test_auth_status_without_identity_preserves_available_tokens(
+        self, mock_fab_auth, capsys
+    ):
+        args = argparse.Namespace(
+            command="auth",
+            auth_subcommand="status",
+            output_format="text",
+        )
+        auth = mock_fab_auth["instance"]
+
+        with (
+            patch.object(auth, "get_identity_type", return_value=None),
+            patch(
+                "fabric_cli.commands.auth.fab_auth._get_token_info_from_bearer_token",
+                return_value={},
+            ),
+        ):
+            fab_auth.status(args)
+
+        captured = capsys.readouterr()
+        assert "Logged in to app.fabric.microsoft.com" in captured.err
+        assert "Logged In: True" in captured.out
+        assert (
+            "Token Fabric PowerBI: mock************************************"
+            in captured.out
+        )
+        assert "Token Storage: mock************************************" in captured.out
+        assert "Token Azure: mock************************************" in captured.out
+        assert [
+            token_call.args[0] for token_call in auth.get_access_token.call_args_list
+        ] == [
+            fab_constant.SCOPE_FABRIC_DEFAULT,
+            fab_constant.SCOPE_FABRIC_DEFAULT,
+            fab_constant.SCOPE_ONELAKE_DEFAULT,
+            fab_constant.SCOPE_AZURE_DEFAULT,
+        ]
+        assert all(
+            token_call.kwargs == {"interactive_renew": False}
+            for token_call in auth.get_access_token.call_args_list
+        )
 
     def test_init_when_user_cancels_the_prompt(
         self, mock_fab_auth, mock_fab_context, mock_fab_logger_log_warning, capsys
