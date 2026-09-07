@@ -38,6 +38,35 @@ class TestAzureCliIdentityType:
         auth.set_access_mode("azure_cli")
         assert auth.get_identity_type() == "azure_cli"
 
+    def test_validate_azure_cli_identity_checks_active_mode_success(
+        self, azure_cli_auth_fixture
+    ):
+        auth = FabAuth()
+        auth._auth_info = {con.IDENTITY_TYPE: "azure_cli"}
+
+        with patch.object(auth, "get_access_token") as get_access_token:
+            auth.validate_azure_cli_identity()
+
+        get_access_token.assert_called_once_with(
+            con.SCOPE_FABRIC_DEFAULT, interactive_renew=False
+        )
+
+    @pytest.mark.parametrize(
+        "identity_type", [None, "user", "service_principal", "managed_identity"]
+    )
+    def test_validate_azure_cli_identity_skips_other_auth_modes_success(
+        self, identity_type, azure_cli_auth_fixture
+    ):
+        auth = FabAuth()
+        auth._auth_info = (
+            {con.IDENTITY_TYPE: identity_type} if identity_type is not None else {}
+        )
+
+        with patch.object(auth, "get_access_token") as get_access_token:
+            auth.validate_azure_cli_identity()
+
+        get_access_token.assert_not_called()
+
     @pytest.mark.parametrize(
         "claims",
         [

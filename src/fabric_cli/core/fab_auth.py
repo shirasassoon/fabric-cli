@@ -328,6 +328,11 @@ class FabAuth:
     def get_identity_type(self):
         return self._get_auth_property(con.IDENTITY_TYPE)
 
+    def validate_azure_cli_identity(self) -> None:
+        """Validate the current Azure CLI identity when that mode is active."""
+        if self.get_identity_type() == "azure_cli":
+            self.get_access_token(con.SCOPE_FABRIC_DEFAULT, interactive_renew=False)
+
     def set_access_mode(self, mode, tenant_id=None):
         if mode not in con.AUTH_KEYS[con.IDENTITY_TYPE]:
             raise FabricCLIError(
