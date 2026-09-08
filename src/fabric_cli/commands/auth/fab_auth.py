@@ -264,12 +264,10 @@ def status(args: Namespace) -> None:
 
     identity_type = auth.get_identity_type()
     tenant_id = auth.get_tenant_id()
-    if identity_type is None:
+
+    if identity_type is None and initial_identity_type == "azure_cli":
         token_info = {}
-        if initial_identity_type == "azure_cli":
-            fabric_secret = "N/A"
-            storage_secret = "N/A"
-            azure_secret = "N/A"
+        fabric_secret, storage_secret, azure_secret = ("N/A",) * 3
 
     upn = token_info.get("upn") or "N/A"
     oid = token_info.get("oid") or "N/A"
