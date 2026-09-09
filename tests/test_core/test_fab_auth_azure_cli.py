@@ -184,7 +184,7 @@ class TestAzureCliIdentityType:
         mock_logout.assert_not_called()
 
     @patch("fabric_cli.core.fab_auth.AzureCliCredential")
-    def test_tenant_updated_on_subsequent_calls_success(
+    def test_tenant_drift_logs_out_failure(
         self, mock_credential_class, azure_cli_auth_fixture
     ):
         """A changed Azure CLI tenant should log out and reset cached state."""
@@ -232,7 +232,7 @@ class TestAzureCliIdentityType:
         mock_warning.assert_called_once_with("Change detected in Azure CLI Tenant ID")
 
     @patch("fabric_cli.core.fab_auth.AzureCliCredential")
-    def test_principal_updated_on_subsequent_calls_success(
+    def test_principal_drift_logs_out_failure(
         self, mock_credential_class, azure_cli_auth_fixture
     ):
         """A changed Azure CLI principal should log out and reset cached state."""
@@ -283,7 +283,7 @@ class TestAzureCliIdentityType:
         )
 
     @patch("fabric_cli.core.fab_auth.AzureCliCredential")
-    def test_tenant_and_principal_updated_on_subsequent_calls_success(
+    def test_tenant_and_principal_drift_logs_out_failure(
         self, mock_credential_class, azure_cli_auth_fixture
     ):
         """Changed Azure CLI tenant and principal should report both changes."""
@@ -591,7 +591,8 @@ class TestAzureCliLoginLogoutLifecycle:
     def test_re_login_resets_state_success(
         self, mock_credential_class, azure_cli_auth_fixture
     ):
-        """Re-login (set_access_mode again) should reset state."""
+        """Re-login in azure_cli mode clears the identity baseline so a new
+        identity is adopted without a drift error."""
         _mock_credential(mock_credential_class)
         auth = FabAuth()
         auth.set_access_mode("azure_cli")
@@ -603,9 +604,67 @@ class TestAzureCliLoginLogoutLifecycle:
             auth._acquire_token_from_azure_cli(con.SCOPE_FABRIC_DEFAULT)
         assert auth.get_tenant_id() == "tenant-A"
 
-        # Re-login — set_access_mode("azure_cli") when already azure_cli does NOT logout
+        # Re-login (set_access_mode again while already azure_cli) must clear baseline
         auth.set_access_mode("azure_cli")
+        assert auth.get_tenant_id() is None
+        assert auth._get_auth_property(con.FAB_PRINCIPAL_ID) is None
+
+        # A different identity now becomes the new baseline, no drift error
+        with patch.object(
+            auth,
+            "_decode_jwt_token",
+            return_value={"tid": "tenant-B", "oid": "principal-B"},
+        ):
+            auth._acquire_token_from_azure_cli(con.SCOPE_FABRIC_DEFAULT)
+        assert auth.get_tenant_id() == "tenant-B"
+        assert auth._get_auth_property(con.FAB_PRINCIPAL_ID) == "principal-B"
+
+    @patch("fabric_cli.utils.fab_version_check.check_and_notify_update")
+    @patch("fabric_cli.core.fab_auth.AzureCliCredential")
+    def test_relogin_after_identity_switch_success(
+        self, mock_credential_class, _mock_version_check, azure_cli_auth_fixture
+    ):
+        """`fab auth login --azure-cli` after switching the az identity must
+        succeed on the first attempt and adopt the new identity as baseline."""
+        import argparse
+
+        from fabric_cli.commands.auth import fab_auth as auth_cmd
+
+        _mock_credential(mock_credential_class)
+        auth = FabAuth()
+
+        def _login_args():
+            return argparse.Namespace(
+                azure_cli=True,
+                identity=False,
+                username=None,
+                password=None,
+                tenant=None,
+                certificate=None,
+                federated_token=None,
+            )
+
+        # First login establishes identity A as the baseline
+        with patch.object(
+            auth,
+            "_decode_jwt_token",
+            return_value={"tid": "tenant-A", "oid": "principal-A"},
+        ):
+            assert auth_cmd.init(_login_args()) is True
         assert auth.get_tenant_id() == "tenant-A"
+        assert auth._get_auth_property(con.FAB_PRINCIPAL_ID) == "principal-A"
+
+        # After `az login` to identity B, re-login must NOT raise a drift error
+        with patch.object(
+            auth,
+            "_decode_jwt_token",
+            return_value={"tid": "tenant-B", "oid": "principal-B"},
+        ):
+            assert auth_cmd.init(_login_args()) is True
+
+        assert auth.get_identity_type() == "azure_cli"
+        assert auth.get_tenant_id() == "tenant-B"
+        assert auth._get_auth_property(con.FAB_PRINCIPAL_ID) == "principal-B"
 
 
 class TestNonAzureCliIsolation:
@@ -668,3 +727,66 @@ class TestNonAzureCliIsolation:
         mock_app.acquire_token_silent.assert_not_called()
         mock_app.acquire_token_interactive.assert_not_called()
         mock_app.acquire_token_for_client.assert_not_called()
+
+
+class TestAuthModeTransitions:
+    """Guard set_access_mode transitions affected by the azure_cli baseline reset."""
+
+    @pytest.mark.parametrize("mode", ["user", "service_principal", "managed_identity"])
+    def test_same_mode_relogin_preserves_state_non_azure_cli_success(
+        self, mode, azure_cli_auth_fixture
+    ):
+        """Re-login in a non-azure_cli mode must not reset stored state."""
+        auth = FabAuth()
+        auth.set_access_mode(mode)
+        auth._set_auth_property(con.FAB_TENANT_ID, "seed-tenant")
+        auth._set_auth_property(con.FAB_PRINCIPAL_ID, "seed-principal")
+
+        auth.set_access_mode(mode)
+
+        assert auth.get_identity_type() == mode
+        assert auth.get_tenant_id() == "seed-tenant"
+        assert auth._get_auth_property(con.FAB_PRINCIPAL_ID) == "seed-principal"
+
+    @patch("fabric_cli.core.fab_auth.AzureCliCredential")
+    def test_switch_from_azure_cli_to_user_clears_principal_baseline_success(
+        self, mock_credential_class, azure_cli_auth_fixture
+    ):
+        """Leaving azure_cli for another mode must clear the identity baseline."""
+        _mock_credential(mock_credential_class)
+        auth = FabAuth()
+        auth.set_access_mode("azure_cli")
+        with patch.object(
+            auth,
+            "_decode_jwt_token",
+            return_value={"tid": "tenant-A", "oid": "principal-A"},
+        ):
+            auth._acquire_token_from_azure_cli(con.SCOPE_FABRIC_DEFAULT)
+        assert auth._get_auth_property(con.FAB_PRINCIPAL_ID) == "principal-A"
+
+        auth.set_access_mode("user")
+
+        assert auth.get_identity_type() == "user"
+        assert auth.get_tenant_id() is None
+        assert auth._get_auth_property(con.FAB_PRINCIPAL_ID) is None
+
+    @patch("fabric_cli.core.fab_auth.AzureCliCredential")
+    def test_switch_from_user_to_azure_cli_starts_clean_success(
+        self, mock_credential_class, azure_cli_auth_fixture
+    ):
+        """Entering azure_cli from another mode must not carry a stale principal."""
+        _mock_credential(mock_credential_class)
+        auth = FabAuth()
+        auth.set_access_mode("user")
+        auth._set_auth_property(con.FAB_PRINCIPAL_ID, "stale-principal")
+
+        auth.set_access_mode("azure_cli")
+        with patch.object(
+            auth,
+            "_decode_jwt_token",
+            return_value={"tid": "tenant-B", "oid": "principal-B"},
+        ):
+            auth._acquire_token_from_azure_cli(con.SCOPE_FABRIC_DEFAULT)
+
+        assert auth.get_tenant_id() == "tenant-B"
+        assert auth._get_auth_property(con.FAB_PRINCIPAL_ID) == "principal-B"
