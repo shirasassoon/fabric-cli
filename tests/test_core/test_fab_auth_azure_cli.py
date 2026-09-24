@@ -222,6 +222,7 @@ class TestAzureCliIdentityType:
         assert auth.get_tenant_id() is None
         assert auth.get_identity_type() is None
         assert auth._azure_cli_credential is None
+        assert context._context is None
         assert fab_mem_store._get_workspaces_from_cache.cache.currsize == 0
         assert fab_mem_store._get_workspace_folders_from_cache.cache.currsize == 0
         mock_credential_class.assert_called_once()
@@ -271,6 +272,7 @@ class TestAzureCliIdentityType:
         assert auth._get_auth_property(con.FAB_PRINCIPAL_ID) is None
         assert auth.get_identity_type() is None
         assert auth._azure_cli_credential is None
+        assert context._context is None
         assert fab_mem_store._get_workspaces_from_cache.cache.currsize == 0
         assert fab_mem_store._get_workspace_folders_from_cache.cache.currsize == 0
         mock_credential_class.assert_called_once()
@@ -318,6 +320,7 @@ class TestAzureCliIdentityType:
         assert auth._get_auth_property(con.FAB_PRINCIPAL_ID) is None
         assert auth.get_identity_type() is None
         assert auth._azure_cli_credential is None
+        assert context._context is None
         mock_logout.assert_called_once_with()
         mock_clear_caches.assert_called_once_with()
         mock_reset_context.assert_called_once_with()

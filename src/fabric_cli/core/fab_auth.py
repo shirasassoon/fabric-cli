@@ -521,7 +521,7 @@ class FabAuth:
                 changed_identity = "Principal ID"
             fab_logger.log_warning(f"Change detected in Azure CLI {changed_identity}")
 
-            # Logout, clear caches, and reset context before raising an error
+            # Logout and clear identity-bound state before raising an error
             self.logout()
             fab_mem_store.clear_caches()
             Context().reset_context()
