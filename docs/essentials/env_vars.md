@@ -24,3 +24,14 @@ The CLI supports multiple authentication methods through environment variables. 
 |  | `FAB_TENANT_ID` | Tenant ID |
 | Managed Identity | `FAB_MANAGED_IDENTITY` | Enable Managed Identity auth (values: `true`, `1`) |
 | | `FAB_SPN_CLIENT_ID` | **Optional**. Service principal client ID for User Assigned |
+
+## Direct access token identity consistency
+
+When direct access tokens are used, the CLI verifies that all configured token
+variables contain the same tenant (`tid`) and principal (`oid`) claims. The
+token tenant must also match `FAB_TENANT_ID`. If a claim is missing or the
+identities differ, the CLI logs out, clears its authentication and resource
+caches, resets the current context, and fails the command.
+
+This validation applies only to direct access token environment variables. It
+does not apply when Azure CLI authentication mode is active.

@@ -61,6 +61,15 @@ class AuthErrors:
         return "Both FAB_TOKEN and FAB_TOKEN_ONELAKE are required"
 
     @staticmethod
+    def direct_token_identity_drift() -> str:
+        return (
+            "Direct access token identity drift detected. FAB_TOKEN, "
+            "FAB_TOKEN_ONELAKE, FAB_TOKEN_AZURE, and FAB_TENANT_ID must "
+            "represent the same tenant and principal. The Fabric CLI session "
+            "has been logged out"
+        )
+
+    @staticmethod
     def invalid_identity_type(identity_type: str, allowed_values: list) -> str:
         return f"The identity type '{identity_type}' is invalid. Allowed values are: {allowed_values}"
 

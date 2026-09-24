@@ -274,6 +274,7 @@ class FabAuth:
 
     def _get_access_token_from_env_vars_if_exist(self, scope):
         if "FAB_TOKEN" in os.environ and "FAB_TOKEN_ONELAKE" in os.environ:
+            self._validate_direct_token_identity()
             match scope:
                 case con.SCOPE_FABRIC_DEFAULT:
                     # this call will validate the token we got from the env var
@@ -312,6 +313,43 @@ class FabAuth:
             )
 
         return None
+
+    def _validate_direct_token_identity(self) -> None:
+        token_variables = (
+            ("FAB_TOKEN", con.FABRIC_TOKEN_AUDIENCE),
+            ("FAB_TOKEN_ONELAKE", con.ONELAKE_TOKEN_AUDIENCE),
+            ("FAB_TOKEN_AZURE", con.AZURE_TOKEN_AUDIENCE),
+        )
+        identities = set()
+
+        for variable, audience in token_variables:
+            token = os.environ.get(variable)
+            if token is None:
+                continue
+
+            claims = self._decode_jwt_token(token, audience)
+            tenant_id = claims.get("tid")
+            object_id = claims.get("oid")
+            if not tenant_id or not object_id:
+                self.logout_session()
+                raise FabricCLIError(
+                    ErrorMessages.Auth.direct_token_identity_drift(),
+                    con.ERROR_AUTHENTICATION_FAILED,
+                )
+            identities.add((tenant_id.lower(), object_id.lower()))
+
+        configured_tenant = os.environ.get("FAB_TENANT_ID")
+        token_tenants = {tenant_id for tenant_id, _ in identities}
+        if len(identities) > 1 or (
+            configured_tenant
+            and token_tenants
+            and configured_tenant.lower() not in token_tenants
+        ):
+            self.logout_session()
+            raise FabricCLIError(
+                ErrorMessages.Auth.direct_token_identity_drift(),
+                con.ERROR_AUTHENTICATION_FAILED,
+            )
 
     def get_tenant(self):
         return Tenant(
@@ -526,7 +564,6 @@ class FabAuth:
 
         try:
             token = None
-            env_var_token = self._get_access_token_from_env_vars_if_exist(scope)
             identity_type = self.get_identity_type()
 
             if identity_type == "service_principal":
@@ -550,28 +587,30 @@ class FabAuth:
                     )
             elif identity_type == "azure_cli":
                 token = self._acquire_token_from_azure_cli(scope)
-            elif env_var_token:
-                token = {
-                    "access_token": env_var_token,
-                }
-            elif identity_type == "user":
-                # Use the cache to get the token
-                accounts = self._get_app().get_accounts()
-                account = None
-                if accounts:
-                    account = accounts[0]
-                token = self._get_app().acquire_token_silent(
-                    scopes=scope, account=account
-                )
-
-                if token is None and interactive_renew:
-                    token = self._get_app().acquire_token_interactive(
-                        scopes=scope,
-                        prompt="select_account",
-                        parent_window_handle=msal.PublicClientApplication.CONSOLE_WINDOW_HANDLE,
+            else:
+                env_var_token = self._get_access_token_from_env_vars_if_exist(scope)
+                if env_var_token:
+                    token = {
+                        "access_token": env_var_token,
+                    }
+                elif identity_type == "user":
+                    # Use the cache to get the token
+                    accounts = self._get_app().get_accounts()
+                    account = None
+                    if accounts:
+                        account = accounts[0]
+                    token = self._get_app().acquire_token_silent(
+                        scopes=scope, account=account
                     )
-                    if token is not None and "id_token_claims" in token:
-                        self.set_tenant(token.get("id_token_claims")["tid"])
+
+                    if token is None and interactive_renew:
+                        token = self._get_app().acquire_token_interactive(
+                            scopes=scope,
+                            prompt="select_account",
+                            parent_window_handle=msal.PublicClientApplication.CONSOLE_WINDOW_HANDLE,
+                        )
+                        if token is not None and "id_token_claims" in token:
+                            self.set_tenant(token.get("id_token_claims")["tid"])
 
             if token and token.get("error"):
                 fab_logger.log_debug(
@@ -653,6 +692,14 @@ class FabAuth:
         config.set_config(con.FAB_DEFAULT_AZ_ADMIN, "")
         config.set_config(con.FAB_DEFAULT_AZ_RESOURCE_GROUP, "")
         config.set_config(con.FAB_DEFAULT_AZ_LOCATION, "")
+
+    def logout_session(self) -> None:
+        from fabric_cli.core.fab_context import Context
+        from fabric_cli.utils import fab_mem_store
+
+        self.logout()
+        fab_mem_store.clear_caches()
+        Context().reset_context()
 
     def get_token_claims(
         self, scope: list[str], claim_names: list[str]

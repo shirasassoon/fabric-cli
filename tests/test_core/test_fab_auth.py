@@ -45,6 +45,7 @@ def _clear_environment_variables(monkeypatch):
     monkeypatch.delenv("FAB_SPN_CLIENT_SECRET", raising=False)
     monkeypatch.delenv("FAB_SPN_CERT_PATH", raising=False)
     monkeypatch.delenv("FAB_SPN_CERT_PASSWORD", raising=False)
+    monkeypatch.delenv("FAB_SPN_FEDERATED_TOKEN", raising=False)
     monkeypatch.delenv("FAB_TOKEN", raising=False)
     monkeypatch.delenv("FAB_TOKEN_ONELAKE", raising=False)
     monkeypatch.delenv("FAB_TOKEN_AZURE", raising=False)
@@ -813,6 +814,101 @@ def test_get_access_token_env_var(monkeypatch):
     )
     token = auth.get_access_token(["dummy_scope"])
     assert token == "env_token"
+
+
+def test_direct_token_identity_consistent(monkeypatch):
+    _clear_environment_variables(monkeypatch)
+    auth = FabAuth()
+    tenant_id = str(uuid.uuid4())
+    object_id = str(uuid.uuid4())
+    tokens = {
+        "fabric-token": {"tid": tenant_id, "oid": object_id},
+        "onelake-token": {"tid": tenant_id, "oid": object_id},
+        "azure-token": {"tid": tenant_id, "oid": object_id},
+    }
+    monkeypatch.setenv("FAB_TENANT_ID", tenant_id)
+    monkeypatch.setenv("FAB_TOKEN", "fabric-token")
+    monkeypatch.setenv("FAB_TOKEN_ONELAKE", "onelake-token")
+    monkeypatch.setenv("FAB_TOKEN_AZURE", "azure-token")
+    monkeypatch.setattr(
+        auth, "_decode_jwt_token", lambda token, audience: tokens[token]
+    )
+
+    token = auth._get_access_token_from_env_vars_if_exist(con.SCOPE_FABRIC_DEFAULT)
+
+    assert token == "fabric-token"
+
+
+def test_direct_token_identity_drift_logs_out_session(monkeypatch):
+    _clear_environment_variables(monkeypatch)
+    auth = FabAuth()
+    tenant_id = str(uuid.uuid4())
+    tokens = {
+        "fabric-token": {"tid": tenant_id, "oid": str(uuid.uuid4())},
+        "onelake-token": {"tid": tenant_id, "oid": str(uuid.uuid4())},
+        "azure-token": {"tid": tenant_id, "oid": str(uuid.uuid4())},
+    }
+    monkeypatch.setenv("FAB_TENANT_ID", tenant_id)
+    monkeypatch.setenv("FAB_TOKEN", "fabric-token")
+    monkeypatch.setenv("FAB_TOKEN_ONELAKE", "onelake-token")
+    monkeypatch.setenv("FAB_TOKEN_AZURE", "azure-token")
+    monkeypatch.setattr(
+        auth, "_decode_jwt_token", lambda token, audience: tokens[token]
+    )
+
+    with (
+        patch.object(auth, "logout") as mock_logout,
+        patch("fabric_cli.utils.fab_mem_store.clear_caches") as mock_clear_caches,
+        patch("fabric_cli.core.fab_context.Context") as mock_context,
+        pytest.raises(FabricCLIError) as exc_info,
+    ):
+        auth._get_access_token_from_env_vars_if_exist(con.SCOPE_FABRIC_DEFAULT)
+
+    assert exc_info.value.status_code == con.ERROR_AUTHENTICATION_FAILED
+    assert exc_info.value.message == ErrorMessages.Auth.direct_token_identity_drift()
+    mock_logout.assert_called_once_with()
+    mock_clear_caches.assert_called_once_with()
+    mock_context.return_value.reset_context.assert_called_once_with()
+
+
+def test_direct_token_tenant_drift_logs_out_session(monkeypatch):
+    _clear_environment_variables(monkeypatch)
+    auth = FabAuth()
+    token_tenant_id = str(uuid.uuid4())
+    token_claims = {"tid": token_tenant_id, "oid": str(uuid.uuid4())}
+    monkeypatch.setenv("FAB_TENANT_ID", str(uuid.uuid4()))
+    monkeypatch.setenv("FAB_TOKEN", "fabric-token")
+    monkeypatch.setenv("FAB_TOKEN_ONELAKE", "onelake-token")
+    monkeypatch.setattr(auth, "_decode_jwt_token", lambda token, audience: token_claims)
+
+    with (
+        patch.object(auth, "logout_session") as mock_logout_session,
+        pytest.raises(FabricCLIError) as exc_info,
+    ):
+        auth._get_access_token_from_env_vars_if_exist(con.SCOPE_FABRIC_DEFAULT)
+
+    assert exc_info.value.message == ErrorMessages.Auth.direct_token_identity_drift()
+    mock_logout_session.assert_called_once_with()
+
+
+def test_azure_cli_auth_ignores_direct_token_environment(monkeypatch):
+    _clear_environment_variables(monkeypatch)
+    auth = FabAuth()
+    monkeypatch.setattr(auth, "get_identity_type", lambda: "azure_cli")
+    monkeypatch.setattr(
+        auth,
+        "_get_access_token_from_env_vars_if_exist",
+        lambda scope: pytest.fail("Azure CLI auth inspected direct-token variables"),
+    )
+    monkeypatch.setattr(
+        auth,
+        "_acquire_token_from_azure_cli",
+        lambda scope: {"access_token": "azure-cli-token"},
+    )
+
+    token = auth.get_access_token(con.SCOPE_FABRIC_DEFAULT)
+
+    assert token == "azure-cli-token"
 
 
 # -----------------------------

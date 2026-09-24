@@ -209,11 +209,7 @@ def init(args: Namespace) -> Any:
 
 
 def logout(args: Namespace) -> None:
-    FabAuth().logout()
-
-    # Clear cache and context including current and stale context files
-    utils_mem_store.clear_caches()
-    Context().reset_context()
+    FabAuth().logout_session()
 
     fab_ui.print_output_format(args, message="Logged out of Fabric account")
 
